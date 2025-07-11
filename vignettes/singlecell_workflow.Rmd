@@ -1,0 +1,37 @@
+---
+title: "singlecell_workflow"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{singlecell_workflow}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r setup}
+library(Programmingpackage)
+```
+seurat_obj <- readRDS("~/Desktop/programming/seurat_filtered.rds")
+gtf_path <- "~/Desktop/programming/Homo_sapiens.GRCh38.111.gtf"
+
+seurat_obj <- filter_protein_coding_genes(seurat_obj, gtf_path)
+
+seurat_obj <- filter_cells_by_gene_expression(seurat_obj)
+
+seurat_obj <- filter_unwanted_genes(seurat_obj, gtf_path)
+
+seurat_obj <- run_pca_and_variance(seurat_obj)
+
+seurat_obj <- run_clustering_and_umap(seurat_obj, dims = 1:13)
+
+top_markers <- find_top_markers(seurat_obj)
+top_markers
+
+seurat_obj <- annotate_cell_types(seurat_obj)
+infer_tissue_origin(seurat_obj)
