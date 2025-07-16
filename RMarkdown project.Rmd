@@ -1,0 +1,210 @@
+---
+title: "programming project"
+author: "Desirè Cantavenera"
+date: "2025-07-10"
+output: html_document
+
+---
+
+## Introduction
+
+This report describes the single-cell RNA-seq analysis of a 10X Genomics dataset using Seurat. The steps include gene annotation, filtering, normalization, dimensionality reduction, clustering, cell type annotation, and inference of tissue origin.
+
+##1 upload libraries
+
+```{r}
+
+library(Seurat)
+library(ggplot2)
+library(data.table)
+library(dplyr)
+
+# Carico il seurat_obj 
+data_dir <- "~/Desktop/programming"
+sc_data <- Read10X(data.dir = data_dir)
+seurat_obj <- CreateSeuratObject(counts = sc_data, project = "ExamProject")
+seurat_obj
+seurat_obj <- NormalizeData(seurat_obj)
+```
+
+##2 - Task 1: Gene Annotation (Filter for protein-coding genes)
+# Obiettivo: filtrare solo i geni codificanti per proteine ("protein-coding"),
+# utilizzando il file GTF ufficiale.  
+# Questo è essenziale per rimuovere trascritti non codificanti o pseudogeni,
+# focalizzando l'analisi solo sui trascritti funzionali.
+```{r}
+
+gtf_path <- "~/Desktop/programming/Homo_sapiens.GRCh38.111.gtf"
+gtf <- fread(gtf_path, header = FALSE, sep = "\t", data.table = FALSE, skip = "#")
+gtf_genes <- gtf[gtf[, 3] == "gene", ]
+gtf_protein_coding <- gtf_genes[grep("gene_biotype \"protein_coding\"", gtf_genes[, 9]), ]
+protein_coding_genes <- gsub(".*gene_name \"([^\"]+)\".*", "\\1", gtf_protein_coding[, 9])
+seurat_obj <- subset(seurat_obj, features = intersect(rownames(seurat_obj), protein_coding_genes))
+```
+
+##3 - Task 2: Filtering cells based on gene expression
+# Obiettivo: identificare il numero di geni espressi per cellula, 
+# contando i geni con almeno 3 UMI.  
+# Questo filtro aiuta a individuare e rimuovere cellule con bassa qualità o
+# contaminazioni ambientali.
+# Il violin plot visualizza la distribuzione di questi valori nelle cellule.
+```{r}
+
+counts_matrix <- GetAssayData(seurat_obj, layer = "counts")
+seurat_obj$genes_umi3 <- colSums(counts_matrix >= 3)
+VlnPlot(seurat_obj, features = "genes_umi3", pt.size = 0) +
+  ggtitle("Number of genes with ≥ 3 UMI per cell")
+
+# Salva il plot
+png("~/Desktop/programming/violin_genes_UMI3.png", width = 800, height = 600)
+VlnPlot(seurat_obj, features = "genes_umi3", pt.size = 0) + 
+  ggtitle("Number of genes with ≥ 3 UMI per cell")
+dev.off()
+```
+## 4 - Task 3: Filter unwanted gene categories
+# Obiettivo: rimuovere categorie geniche non informative o potenzialmente
+# confondenti come:
+# - Geni mitocondriali (MT): indicano stress o apoptosi cellulare.
+# - Geni ribosomiali (RP): altamente espressi e spesso tecnicamente dominanti.
+# - Pseudogeni ribosomiali: simili ai RP, ma non funzionali.
+# Il filtro viene effettuato con espressioni regolari basate sul nome dei geni.
+# La tabella riepilogativa mostra il numero di geni rimossi per categoria.
+```{r}
+all_genes <- rownames(seurat_obj) 
+mito_genes <- gtf_genes[grep("MT-", gtf_genes[, 9]), ]
+mito_gene_names <- gsub(".*gene_name \"([^\"]+)\".*", "\\1", mito_genes[, 9])
+mito_gene_names <- mito_gene_names[mito_gene_names %in% rownames(seurat_obj)]
+
+ribo_genes <- gtf_genes[grep("gene_name \"RP[SL][0-9]+\"", gtf_genes[, 9]), ]
+ribo_gene_names <- gsub(".*gene_name \"([^\"]+)\".*", "\\1", ribo_genes[, 9])
+ribo_gene_names <- ribo_gene_names[ribo_gene_names %in% rownames(seurat_obj)]
+
+pseudo_genes <- gtf_genes[grep("gene_biotype \"pseudogene\"", gtf_genes[, 9]), ]
+pseudo_gene_names <- gsub(".*gene_name \"([^\"]+)\".*", "\\1", pseudo_genes[, 9])
+pseudo_gene_names <- pseudo_gene_names[pseudo_gene_names %in% rownames(seurat_obj)]
+
+summary_table <- data.frame(
+  Category = c("Mitochondrial genes", "Ribosomal genes", "Pseudogenes"),
+  Removed = c(length(mito_gene_names), length(ribo_gene_names), length(pseudo_gene_names))
+)
+print(summary_table)
+
+genes_to_remove <- unique(c(mito_gene_names, ribo_gene_names, pseudo_gene_names))
+seurat_obj <- subset(seurat_obj, features = setdiff(rownames(seurat_obj), genes_to_remove))
+```
+
+##5 - Task 4: PCA and Variance Explained
+# Obiettivo: ridurre la dimensionalità del dataset per evidenziare la variabilità biologica più rilevante.  
+# PCA viene calcolata sui geni a maggiore variabilità (PC20).  
+# L’ElbowPlot aiuta a determinare il numero ottimale di componenti principali (PC) da usare.  
+# L’istogramma mostra la varianza spiegata da ciascun PC: i primi PC spiegano la maggior parte della variabilità.  
+# Ho deciso di usare i primi 13 PC sulla base dell’"elbow" in modo tale da includere i primi 9 PC, ma anche ulteriori altri dati fino al PC13 pur mantenendo basso il rumore di fondo.
+```{r}
+seurat_obj <- NormalizeData(seurat_obj)
+seurat_obj <- FindVariableFeatures(seurat_obj, selection.method = "vst", nfeatures = 2000)
+seurat_obj <- ScaleData(seurat_obj)
+seurat_obj <- RunPCA(seurat_obj)
+ElbowPlot(seurat_obj, ndims = 20)  # mostriamo i primi 20 PC
+
+pca_variance <- seurat_obj[["pca"]]@stdev^2
+explained_variance <- pca_variance / sum(pca_variance)
+
+# Crea un data frame con i primi 20 PC
+var_df <- data.frame(
+  PC = paste0("PC", 1:20),
+  Variance = explained_variance[1:20]
+)
+
+# Istogramma con ggplot2
+library(ggplot2)
+
+ggplot(var_df, aes(x = PC, y = Variance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  theme_minimal() +
+  ggtitle("Variance explained by first 20 PCs") +
+  ylab("Proportion of Variance Explained") +
+  xlab("Principal Components") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+round(explained_variance[1:20], 4) 
+
+ggsave("~/Desktop/programming/pca_variance_histogram.png", width = 8, height = 5)
+```
+
+##6 - Task 5 & 6: Clustering and UMAP
+# Obiettivo: visualizzare il dataset in due dimensioni preservando la struttura locale tra le cellule.  
+# UMAP è una tecnica di riduzione non lineare della dimensionalità, utile per esplorare i pattern di clustering.  
+# È stato usato lo stesso numero di PC determinato nell’analisi precedente (13 PC).  
+# Il plot UMAP consente di osservare la separazione tra i cluster di cellule.
+```{r}
+seurat_obj <- FindNeighbors(seurat_obj, dims = 1:13)
+seurat_obj <- FindClusters(seurat_obj, resolution = 0.5)
+seurat_obj <- RunUMAP(seurat_obj, dims = 1:13)
+
+library(ggplot2)
+DimPlot(seurat_obj, reduction = "umap", label = TRUE) +
+  ggtitle("UMAP con clustering delle cellule")
+
+# Obiettivo: identificare gruppi di cellule simili basati sull’espressione genica.  
+# È stato usato l’algoritmo di clustering Louvain, che lavora sul grafo dei vicini (kNN) calcolato sui PC.  
+# La risoluzione è impostata a 0.5: valori maggiori portano a più cluster.  
+# Sono stati identificati i marker (geni maggiormente espressi) per ogni cluster con `FindAllMarkers`.  
+# `top_markers` mostra il gene con logFC più alto per ogni cluster, utile per la successiva annotazione.  
+# I marker vengono anche visualizzati su UMAP per osservare la loro distribuzione.
+
+markers <- FindAllMarkers(seurat_obj, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+head(markers)
+library(dplyr)
+top_markers <- markers %>% group_by(cluster) %>% top_n(n = 1, wt = avg_log2FC)
+print(top_markers)
+top_markers$gene 
+FeaturePlot(seurat_obj, features = c("MCEMP1", "ADTRP", "CDKN1C"))
+```
+
+## Task 7: Cell Type Annotation
+# Obiettivo: assegnare un'identità biologica ai cluster sulla base dei marker genici.  
+# È stata creata una mappa tra ID numerici dei cluster e nomi dei tipi cellulari basata su:
+# - Marker noti nella letteratura (es. ADTRP per T cells, FCER1A per basofili/pDCs)
+# - Geni noti per specifiche funzioni (es. CDKN1C per cellule in ciclo, GZMH per citotossiche)
+# - Annotazioni ipotetiche per geni meno noti.
+# Il plot UMAP con nomi dei tipi cellulari aiuta a verificare la coerenza delle etichette.
+
+```{r}
+new_cluster_ids <- c(
+  "Inflammatory T/NK",  # Cluster 0 → CXCL10
+  "T cells",            # Cluster 1 → ADTRP
+  "Monocytes",          # Cluster 2 → MCEMP1
+  "Unknown_LINC02446",  # Cluster 3 → LINC02446
+  "Activated T",        # Cluster 4 → TNFRSF4 (OX40)
+  "Cytotoxic NK/CD8",   # Cluster 5 → GZMH
+  "Stress/apoptotic",   # Cluster 6 → MTRNR2L12
+  "Immune signal",      # Cluster 7 → PLCG2
+  "Neuronal-like?",     # Cluster 8 → KCNG1
+  "Muscle-like?",       # Cluster 9 → SSPN
+  "Cycling cells",      # Cluster 10 → CDKN1C
+  "Steroid-active",     # Cluster 11 → AKR1C3
+  "ENHO-high",          # Cluster 12 → ENHO
+  "Ion transport",      # Cluster 13 → SLC4A10
+  "Endothelial?",       # Cluster 14 → PROC
+  "TMEM40-high",        # Cluster 15 → TMEM40
+  "IGF1-high"           # Cluster 16 → IGF1
+)
+names(new_cluster_ids) <- levels(seurat_obj)
+seurat_obj <- RenameIdents(seurat_obj, new_cluster_ids)
+
+library(ggplot2)
+DimPlot(seurat_obj, reduction = "umap", label = TRUE) +
+  ggtitle("UMAP con annotazione dei tipi cellulari")
+VlnPlot(seurat_obj, features = "CDKN1C")
+saveRDS(seurat_obj, "~/Desktop/programming/seurat_annotated.rds")
+```
+
+## Task 8: Tissue Origin Inference
+# Obiettivo: ipotizzare il tessuto d'origine del campione analizzato, basandosi su:
+# - Tipi cellulari presenti (T cells, Monocytes, Basophils, etc.)
+# - Assenza di cellule epiteliali, muscolari o stromali
+# - Pattern nei marker genici  
+
+Based on the cell types identified (e.g., T cells, monocytes, cytotoxic T, basophils/pDCs), the dataset likely originates from **peripheral blood** or **lymphoid tissue**. The absence of clear epithelial or mesenchymal markers supports this immune
+
